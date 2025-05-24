@@ -178,6 +178,7 @@ selfsigned
 setsebool
 sitemap
 sls
+sni
 Sourceware
 Spambot
 sparkline
@@ -210,7 +211,7 @@ webmaster
 webpage
 websecure
 websites
-workaround
+Workaround
 workdir
 xcaddy
 Xeact
