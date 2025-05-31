@@ -6,6 +6,7 @@ amazonbot
 anthro
 anubis
 anubistest
+Applebot
 archlinux
 badregexes
 berr
@@ -30,12 +31,14 @@ cgr
 chainguard
 chall
 challengemozilla
+checkpath
 checkresult
 chen
 chibi
 cidranger
 ckie
 cloudflare
+confd
 containerbuild
 coreutils
 CRDs
@@ -56,6 +59,7 @@ dracula
 dronebl
 droneblresponse
 duckduckbot
+eerror
 ellenjoe
 enbyware
 everyones
@@ -81,6 +85,7 @@ goodbot
 googlebot
 govulncheck
 GPG
+GPT
 grw
 Hashcash
 hashrate
@@ -96,7 +101,9 @@ iat
 ifm
 inp
 iss
+isset
 ivh
+Jenomis
 JGit
 journalctl
 jshelter
@@ -108,8 +115,10 @@ keypair
 KHTML
 kinda
 KUBECONFIG
+lcj
 ldflags
 letsencrypt
+Lexentale
 lgbt
 licend
 licstart
@@ -125,8 +134,10 @@ maintainership
 malware
 mcr
 memes
+metrix
 mimi
 minica
+mistralai
 Mojeek
 mojeekbot
 mozilla
@@ -137,6 +148,8 @@ NONINFRINGEMENT
 nosleep
 ogtags
 onionservice
+openai
+openrc
 pag
 parseable
 passthrough
@@ -167,6 +180,7 @@ reputational
 reqmeta
 risc
 ruleset
+runlevels
 RUnlock
 sas
 sasl
@@ -176,8 +190,10 @@ sebest
 secretplans
 selfsigned
 setsebool
+shellcheck
 sitemap
 sls
+sni
 Sourceware
 Spambot
 sparkline
@@ -188,6 +204,7 @@ stoppostcmd
 subgrid
 subr
 subrequest
+SVCNAME
 tagline
 tarballs
 techaro
@@ -210,7 +227,8 @@ webmaster
 webpage
 websecure
 websites
-workaround
+wordpress
+Workaround
 workdir
 xcaddy
 Xeact

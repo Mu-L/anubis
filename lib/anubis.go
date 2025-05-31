@@ -31,10 +31,10 @@ import (
 )
 
 var (
-	challengesIssued = promauto.NewCounter(prometheus.CounterOpts{
+	challengesIssued = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "anubis_challenges_issued",
 		Help: "The total number of challenges issued",
-	})
+	}, []string{"method"})
 
 	challengesValidated = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "anubis_challenges_validated",
@@ -56,6 +56,11 @@ var (
 		Help:    "The time taken for a browser to generate a response (milliseconds)",
 		Buckets: prometheus.ExponentialBucketsRange(1, math.Pow(2, 18), 19),
 	})
+
+	requestsProxied = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "anubis_proxied_requests_total",
+		Help: "Number of requests proxied through Anubis to upstream targets",
+	}, []string{"host"})
 )
 
 type Server struct {
@@ -71,11 +76,16 @@ type Server struct {
 }
 
 func (s *Server) challengeFor(r *http.Request, difficulty int) string {
-	fp := sha256.Sum256(s.priv.Seed())
+	fp := sha256.Sum256(s.pub[:])
+
+	acceptLanguage := r.Header.Get("Accept-Language")
+	if len(acceptLanguage) > 5 {
+		acceptLanguage = acceptLanguage[:5]
+	}
 
 	challengeData := fmt.Sprintf(
 		"Accept-Language=%s,X-Real-IP=%s,User-Agent=%s,WeekTime=%s,Fingerprint=%x,Difficulty=%d",
-		r.Header.Get("Accept-Language"),
+		acceptLanguage,
 		r.Header.Get("X-Real-Ip"),
 		r.UserAgent(),
 		time.Now().UTC().Round(24*7*time.Hour).Format(time.RFC3339),
@@ -95,6 +105,12 @@ func (s *Server) maybeReverseProxyOrPage(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) maybeReverseProxy(w http.ResponseWriter, r *http.Request, httpStatusOnly bool) {
 	lg := internal.GetRequestLogger(r)
+
+	// Adjust cookie path if base prefix is not empty
+	cookiePath := "/"
+	if anubis.BasePrefix != "" {
+		cookiePath = strings.TrimSuffix(anubis.BasePrefix, "/") + "/"
+	}
 
 	cr, rule, err := s.check(r)
 	if err != nil {
@@ -121,21 +137,21 @@ func (s *Server) maybeReverseProxy(w http.ResponseWriter, r *http.Request, httpS
 	ckie, err := r.Cookie(s.cookieName)
 	if err != nil {
 		lg.Debug("cookie not found", "path", r.URL.Path)
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		s.RenderIndex(w, r, rule, httpStatusOnly)
 		return
 	}
 
 	if err := ckie.Valid(); err != nil {
 		lg.Debug("cookie is invalid", "err", err)
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		s.RenderIndex(w, r, rule, httpStatusOnly)
 		return
 	}
 
 	if time.Now().After(ckie.Expires) && !ckie.Expires.IsZero() {
 		lg.Debug("cookie expired", "path", r.URL.Path)
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		s.RenderIndex(w, r, rule, httpStatusOnly)
 		return
 	}
@@ -146,7 +162,30 @@ func (s *Server) maybeReverseProxy(w http.ResponseWriter, r *http.Request, httpS
 
 	if err != nil || !token.Valid {
 		lg.Debug("invalid token", "path", r.URL.Path, "err", err)
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
+		s.RenderIndex(w, r, rule, httpStatusOnly)
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		lg.Debug("invalid token claims type", "path", r.URL.Path)
+		s.ClearCookie(w, s.cookieName, cookiePath)
+		s.RenderIndex(w, r, rule, httpStatusOnly)
+		return
+	}
+
+	policyRule, ok := claims["policyRule"].(string)
+	if !ok {
+		lg.Debug("policyRule claim is not a string")
+		s.ClearCookie(w, s.cookieName, cookiePath)
+		s.RenderIndex(w, r, rule, httpStatusOnly)
+		return
+	}
+
+	if policyRule != rule.Hash() {
+		lg.Debug("user originally passed with a different rule, issuing new challenge", "old", policyRule, "new", rule.Name)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		s.RenderIndex(w, r, rule, httpStatusOnly)
 		return
 	}
@@ -156,13 +195,19 @@ func (s *Server) maybeReverseProxy(w http.ResponseWriter, r *http.Request, httpS
 }
 
 func (s *Server) checkRules(w http.ResponseWriter, r *http.Request, cr policy.CheckResult, lg *slog.Logger, rule *policy.Bot) bool {
+	// Adjust cookie path if base prefix is not empty
+	cookiePath := "/"
+	if anubis.BasePrefix != "" {
+		cookiePath = strings.TrimSuffix(anubis.BasePrefix, "/") + "/"
+	}
+
 	switch cr.Rule {
 	case config.RuleAllow:
 		lg.Debug("allowing traffic to origin (explicit)")
 		s.ServeHTTPNext(w, r)
 		return true
 	case config.RuleDeny:
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Info("explicit deny")
 		if rule == nil {
 			lg.Error("rule is nil, cannot calculate checksum")
@@ -181,7 +226,7 @@ func (s *Server) checkRules(w http.ResponseWriter, r *http.Request, cr policy.Ch
 		s.RenderBench(w, r)
 		return true
 	default:
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		slog.Error("CONFIG ERROR: unknown rule", "rule", cr.Rule)
 		s.respondWithError(w, r, "Internal Server Error: administrator has misconfigured Anubis. Please contact the administrator and ask them to look for the logs around \"maybeReverseProxy.Rules\"")
 		return true
@@ -214,6 +259,21 @@ func (s *Server) handleDNSBL(w http.ResponseWriter, r *http.Request, ip string, 
 func (s *Server) MakeChallenge(w http.ResponseWriter, r *http.Request) {
 	lg := internal.GetRequestLogger(r)
 
+	redir := r.FormValue("redir")
+	if redir == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		encoder := json.NewEncoder(w)
+		lg.Error("invalid invocation of MakeChallenge", "redir", redir)
+		encoder.Encode(struct {
+			Error string `json:"error"`
+		}{
+			Error: "Invalid invocation of MakeChallenge",
+		})
+		return
+	}
+
+	r.URL.Path = redir
+
 	encoder := json.NewEncoder(w)
 	cr, rule, err := s.check(r)
 	if err != nil {
@@ -233,7 +293,7 @@ func (s *Server) MakeChallenge(w http.ResponseWriter, r *http.Request) {
 	lg = lg.With("check_result", cr)
 	challenge := s.challengeFor(r, rule.Challenge.Difficulty)
 
-	s.SetCookie(w, anubis.TestCookieName, challenge, "")
+	s.SetCookie(w, anubis.TestCookieName, challenge, "/")
 
 	err = encoder.Encode(struct {
 		Rules     *config.ChallengeRules `json:"rules"`
@@ -248,11 +308,19 @@ func (s *Server) MakeChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg.Debug("made challenge", "challenge", challenge, "rules", rule.Challenge, "cr", cr)
-	challengesIssued.Inc()
+	challengesIssued.WithLabelValues("api").Inc()
 }
 
 func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 	lg := internal.GetRequestLogger(r)
+
+	// Adjust cookie path if base prefix is not empty
+	cookiePath := "/"
+	if anubis.BasePrefix != "" {
+		cookiePath = strings.TrimSuffix(anubis.BasePrefix, "/") + "/"
+	}
+
+	s.ClearCookie(w, anubis.TestCookieName, "/")
 
 	redir := r.FormValue("redir")
 	redirURL, err := url.ParseRequestURI(redir)
@@ -274,7 +342,7 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 
 	nonceStr := r.FormValue("nonce")
 	if nonceStr == "" {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("no nonce")
 		s.respondWithError(w, r, "missing nonce")
 		return
@@ -282,7 +350,7 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 
 	elapsedTimeStr := r.FormValue("elapsedTime")
 	if elapsedTimeStr == "" {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("no elapsedTime")
 		s.respondWithError(w, r, "missing elapsedTime")
 		return
@@ -290,7 +358,7 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 
 	elapsedTime, err := strconv.ParseFloat(elapsedTimeStr, 64)
 	if err != nil {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("elapsedTime doesn't parse", "err", err)
 		s.respondWithError(w, r, "invalid elapsedTime")
 		return
@@ -313,18 +381,16 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 	challenge := s.challengeFor(r, rule.Challenge.Difficulty)
 
 	if _, err := r.Cookie(anubis.TestCookieName); err == http.ErrNoCookie {
-		s.ClearCookie(w, s.cookieName)
-		s.ClearCookie(w, anubis.TestCookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
+		s.ClearCookie(w, anubis.TestCookieName, cookiePath)
 		lg.Warn("user has cookies disabled, this is not an anubis bug")
 		s.respondWithError(w, r, "Your browser is configured to disable cookies. Anubis requires cookies for the legitimate interest of making sure you are a valid client. Please enable cookies for this domain")
 		return
 	}
 
-	s.ClearCookie(w, anubis.TestCookieName)
-
 	nonce, err := strconv.Atoi(nonceStr)
 	if err != nil {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("nonce doesn't parse", "err", err)
 		s.respondWithError(w, r, "invalid response")
 		return
@@ -334,7 +400,7 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 	calculated := internal.SHA256sum(calcString)
 
 	if subtle.ConstantTimeCompare([]byte(response), []byte(calculated)) != 1 {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("hash does not match", "got", response, "want", calculated)
 		s.respondWithStatus(w, r, "invalid response", http.StatusForbidden)
 		failedValidations.Inc()
@@ -343,31 +409,24 @@ func (s *Server) PassChallenge(w http.ResponseWriter, r *http.Request) {
 
 	// compare the leading zeroes
 	if !strings.HasPrefix(response, strings.Repeat("0", rule.Challenge.Difficulty)) {
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		lg.Debug("difficulty check failed", "response", response, "difficulty", rule.Challenge.Difficulty)
 		s.respondWithStatus(w, r, "invalid response", http.StatusForbidden)
 		failedValidations.Inc()
 		return
 	}
 
-	// Adjust cookie path if base prefix is not empty
-	cookiePath := "/"
-	if anubis.BasePrefix != "" {
-		cookiePath = strings.TrimSuffix(anubis.BasePrefix, "/") + "/"
-	}
 	// generate JWT cookie
-	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{
-		"challenge": challenge,
-		"nonce":     nonceStr,
-		"response":  response,
-		"iat":       time.Now().Unix(),
-		"nbf":       time.Now().Add(-1 * time.Minute).Unix(),
-		"exp":       time.Now().Add(s.opts.CookieExpiration).Unix(),
+	tokenString, err := s.signJWT(jwt.MapClaims{
+		"challenge":  challenge,
+		"nonce":      nonceStr,
+		"response":   response,
+		"policyRule": rule.Hash(),
+		"action":     string(cr.Rule),
 	})
-	tokenString, err := token.SignedString(s.priv)
 	if err != nil {
 		lg.Error("failed to sign JWT", "err", err)
-		s.ClearCookie(w, s.cookieName)
+		s.ClearCookie(w, s.cookieName, cookiePath)
 		s.respondWithError(w, r, "failed to sign JWT")
 		return
 	}
@@ -420,6 +479,7 @@ func (s *Server) check(r *http.Request) (policy.CheckResult, *policy.Bot, error)
 			ReportAs:   s.policy.DefaultDifficulty,
 			Algorithm:  config.AlgorithmFast,
 		},
+		Rules: &policy.CheckerList{},
 	}, nil
 }
 
